@@ -220,7 +220,3 @@ const WIN_COUNT = 5;     // 默认五连珠，可改为 4 或 6
 ## 📄 许可
 
 MIT License —— 自由使用、修改、分发。
-
----
-
-🤖 本项目由 [Claude Code](https://claude.com/claude-code) 辅助生成
