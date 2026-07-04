@@ -1,0 +1,13 @@
+{
+  "name": "gomoku-online",
+  "version": "1.0.0",
+  "description": "五子棋局域网联机游戏",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "socket.io": "^4.8.0"
+  }
+}

@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>五子棋 · 局域网联机</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: #f0d9b5;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            user-select: none;
+        }
+
+        .game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+        }
+
+        h1 {
+            font-size: 30px;
+            color: #5d4037;
+            letter-spacing: 4px;
+        }
+
+        /* ---- 连接状态卡片 ---- */
+        .status-card {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            background: #fff;
+            padding: 10px 24px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+            font-size: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+        .status-dot.waiting { background: #ff9800; }
+        .status-dot.ready    { background: #4caf50; }
+        .status-dot.error    { background: #f44336; animation: none; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.3; }
+        }
+
+        .you-badge {
+            display: inline-block;
+            padding: 3px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        .you-badge.black {
+            background: #333;
+            color: #fff;
+        }
+        .you-badge.white {
+            background: #e0e0e0;
+            color: #333;
+            border: 1px solid #bbb;
+        }
+
+        .turn-highlight {
+            font-weight: bold;
+            font-size: 16px;
+        }
+        .turn-highlight.your-turn { color: #4caf50; }
+        .turn-highlight.wait-turn  { color: #999; }
+
+        .winner-msg {
+            font-size: 17px;
+            font-weight: bold;
+            color: #e53935;
+        }
+
+        button {
+            padding: 8px 20px;
+            font-size: 15px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #5d4037;
+            color: #fff;
+            font-weight: bold;
+            letter-spacing: 1px;
+            transition: background 0.2s;
+        }
+        button:hover  { background: #795548; }
+        button:active { background: #4e342e; }
+        button:disabled {
+            background: #bbb;
+            cursor: not-allowed;
+        }
+
+        .btn-copy {
+            background: #1565c0;
+            font-size: 13px;
+            padding: 6px 14px;
+        }
+        .btn-copy:hover { background: #1976d2; }
+
+        .link-text {
+            font-size: 12px;
+            color: #666;
+            background: #f5f5f5;
+            padding: 4px 10px;
+            border-radius: 6px;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* ---- 提示消息 ---- */
+        .toast {
+            position: fixed;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: #fff;
+            padding: 10px 28px;
+            border-radius: 8px;
+            font-size: 15px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 100;
+        }
+        .toast.show { opacity: 1; }
+
+        /* ---- 棋盘 ---- */
+        canvas {
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+            cursor: pointer;
+        }
+        canvas.blocked { cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <!-- 提示消息 -->
+    <div class="toast" id="toast"></div>
+
+    <div class="game-container">
+        <h1>五 子 棋 · 联 机</h1>
+
+        <!-- 状态面板 -->
+        <div class="status-card" id="status-card">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-text">连接中...</span>
+            <span id="badge-area"></span>
+            <span class="turn-highlight" id="turn-hint"></span>
+            <span class="winner-msg" id="winner-msg" style="display:none;"></span>
+            <button id="btn-copy" class="btn-copy" style="display:none;" onclick="copyLink()">
+                📋 复制链接
+            </button>
+            <button id="btn-reset" onclick="resetGame()">🔄 重新开始</button>
+        </div>
+
+        <!-- 棋盘 -->
+        <canvas id="board"></canvas>
+    </div>
+
+    <!-- Socket.io 客户端（从服务器加载） -->
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script>
+        // ========== 画布 & 绘制参数 ==========
+        const BOARD_SIZE = 15;
+        const CELL_SIZE = 36;
+        const PADDING = 40;
+        const STONE_RADIUS = 16;
+
+        const canvas = document.getElementById('board');
+        const ctx = canvas.getContext('2d');
+        const canvasSize = PADDING * 2 + (BOARD_SIZE - 1) * CELL_SIZE;
+        canvas.width = canvasSize;
+        canvas.height = canvasSize;
+
+        // ========== 游戏状态 ==========
+        let board = [];            // 从服务器同步
+        let myColor = 0;          // 我是黑(1)还是白(2)，0=未分配
+        let myName = '';
+        let currentTurn = 1;
+        let gameOver = false;
+        let winner = 0;
+        let roomReady = false;    // 两人都到齐了？
+        let lastMove = null;
+        let hoverPos = null;
+
+        // 初始化空棋盘
+        for (let row = 0; row < BOARD_SIZE; row++) {
+            board[row] = new Array(BOARD_SIZE).fill(0);
+        }
+
+        // ========== Socket.io 连接 ==========
+        const socket = io();
+
+        // --- 房间状态 ---
+        socket.on('roomStatus', (data) => {
+            console.log('房间状态:', data);
+
+            if (data.status === 'full') {
+                setStatus('error', '⚠️ 房间已满，请稍后再试');
+                return;
+            }
+
+            if (data.yourColor) {
+                myColor = data.yourColor;
+                myName = data.yourName;
+            }
+
+            if (data.board) {
+                board = data.board;
+            }
+            if (data.currentTurn !== undefined) currentTurn = data.currentTurn;
+            if (data.gameOver !== undefined) gameOver = data.gameOver;
+            if (data.winner !== undefined) winner = data.winner;
+
+            roomReady = (data.status === 'ready');
+
+            updateStatusDisplay();
+            updateBadge();
+            updateTurnHint();
+            drawBoard();
+        });
+
+        // --- 落子确认 ---
+        socket.on('moveConfirmed', (data) => {
+            board[data.row][data.col] = data.player;
+            lastMove = { row: data.row, col: data.col };
+            currentTurn = currentTurn === 1 ? 2 : 1;
+            drawBoard();
+            updateTurnHint();
+        });
+
+        // --- 游戏结束 ---
+        socket.on('gameOver', (data) => {
+            gameOver = true;
+            winner = data.winner;
+            const msg = document.getElementById('winner-msg');
+            const name = data.winner === 1 ? '黑方' : '白方';
+            if (data.winner === 0) {
+                msg.textContent = '🤝 平局！';
+            } else {
+                msg.textContent = `🏆 ${name} 获胜！`;
+            }
+            msg.style.display = '';
+            updateTurnHint();
+            drawBoard();
+        });
+
+        // --- 对手离开 ---
+        socket.on('playerLeft', (data) => {
+            roomReady = false;
+            gameOver = true;
+            updateStatusDisplay();
+            updateTurnHint();
+
+            const msg = document.getElementById('winner-msg');
+            msg.textContent = '😢 ' + (data.message || '对手离开了');
+            msg.style.display = '';
+            drawBoard();
+        });
+
+        // --- 重新开始确认 ---
+        socket.on('resetConfirmed', (data) => {
+            board = data.board;
+            currentTurn = data.currentTurn;
+            gameOver = false;
+            winner = 0;
+            lastMove = null;
+            hoverPos = null;
+
+            document.getElementById('winner-msg').style.display = 'none';
+            updateStatusDisplay();
+            updateTurnHint();
+            drawBoard();
+        });
+
+        // --- 落子错误 ---
+        socket.on('moveError', (data) => {
+            showToast(data.message || '操作失败');
+        });
+
+        // --- 断开连接 ---
+        socket.on('disconnect', () => {
+            setStatus('error', '⚠️ 与服务器断开连接');
+        });
+        socket.on('connect', () => {
+            socket.emit('join');
+        });
+
+        // ========== UI 更新 ==========
+        function updateStatusDisplay() {
+            if (!socket.connected) {
+                setStatus('error', '未连接');
+                return;
+            }
+            if (roomReady && !gameOver) {
+                setStatus('ready', '已连接 · 对战中');
+            } else if (roomReady && gameOver) {
+                setStatus('ready', '已连接 · 游戏结束');
+            } else if (!roomReady && myColor) {
+                setStatus('waiting', '等待对手加入...');
+            } else {
+                setStatus('waiting', '连接中...');
+            }
+        }
+
+        function updateBadge() {
+            const area = document.getElementById('badge-area');
+            if (!myColor) {
+                area.innerHTML = '';
+                return;
+            }
+            const cls = myColor === 1 ? 'black' : 'white';
+            area.innerHTML = `<span class="you-badge ${cls}">你是 ${myName}</span>`;
+        }
+
+        function updateTurnHint() {
+            const el = document.getElementById('turn-hint');
+            if (gameOver) {
+                el.textContent = '';
+                el.className = 'turn-highlight';
+                return;
+            }
+            if (!roomReady) {
+                el.textContent = '';
+                el.className = 'turn-highlight';
+                return;
+            }
+            if (currentTurn === myColor) {
+                el.textContent = '👈 轮到你了！';
+                el.className = 'turn-highlight your-turn';
+            } else {
+                el.textContent = '⏳ 等待对手落子...';
+                el.className = 'turn-highlight wait-turn';
+            }
+        }
+
+        function setStatus(type, text) {
+            const dot = document.getElementById('status-dot');
+            const txt = document.getElementById('status-text');
+            dot.className = 'status-dot ' + type;
+            txt.textContent = text;
+
+            // 显示/隐藏复制链接按钮
+            const btnCopy = document.getElementById('btn-copy');
+            if (type === 'waiting' && myColor) {
+                btnCopy.style.display = '';
+            } else if (type === 'ready') {
+                btnCopy.style.display = '';
+            }
+        }
+
+        // ========== 棋盘绘制 ==========
+        function drawBoard() {
+            ctx.clearRect(0, 0, canvasSize, canvasSize);
+
+            // 背景
+            ctx.fillStyle = '#deb887';
+            ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+            const start = PADDING;
+            const end = PADDING + (BOARD_SIZE - 1) * CELL_SIZE;
+
+            // 网格线
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                const pos = PADDING + i * CELL_SIZE;
+                ctx.beginPath(); ctx.moveTo(pos, start); ctx.lineTo(pos, end); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(start, pos); ctx.lineTo(end, pos); ctx.stroke();
+            }
+
+            // 星位
+            const stars = [
+                [3,3],[3,7],[3,11],
+                [7,3],[7,7],[7,11],
+                [11,3],[11,7],[11,11]
+            ];
+            ctx.fillStyle = '#333';
+            for (const [r, c] of stars) {
+                ctx.beginPath();
+                ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // 棋子
+            for (let row = 0; row < BOARD_SIZE; row++) {
+                for (let col = 0; col < BOARD_SIZE; col++) {
+                    if (board[row][col] === 0) continue;
+                    drawStone(PADDING + col * CELL_SIZE, PADDING + row * CELL_SIZE, board[row][col]);
+                }
+            }
+
+            // 最后一手标记
+            if (lastMove) {
+                const x = PADDING + lastMove.col * CELL_SIZE;
+                const y = PADDING + lastMove.row * CELL_SIZE;
+                ctx.fillStyle = '#e53935';
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // 悬停预览（仅当轮到我可以落子）
+            const canMove = roomReady && !gameOver && currentTurn === myColor;
+            if (canMove && hoverPos) {
+                const { row, col } = hoverPos;
+                if (board[row][col] === 0) {
+                    ctx.globalAlpha = 0.35;
+                    drawStone(PADDING + col * CELL_SIZE, PADDING + row * CELL_SIZE, myColor);
+                    ctx.globalAlpha = 1.0;
+                }
+            }
+
+            // 鼠标样式
+            canvas.className = canMove ? '' : 'blocked';
+        }
+
+        function drawStone(x, y, player) {
+            const g = ctx.createRadialGradient(x - 3, y - 3, 2, x, y, STONE_RADIUS);
+            if (player === 1) {
+                g.addColorStop(0, '#666');
+                g.addColorStop(1, '#111');
+            } else {
+                g.addColorStop(0, '#fff');
+                g.addColorStop(1, '#bbb');
+            }
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(x, y, STONE_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = player === 1 ? '#000' : '#999';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // ========== 鼠标交互 ==========
+        canvas.addEventListener('click', (e) => {
+            // 不允许：游戏结束、没轮到我、还没准备好
+            if (gameOver || !roomReady || currentTurn !== myColor) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvasSize / rect.width;
+            const scaleY = canvasSize / rect.height;
+            const mx = (e.clientX - rect.left) * scaleX;
+            const my = (e.clientY - rect.top)  * scaleY;
+
+            const col = Math.round((mx - PADDING) / CELL_SIZE);
+            const row = Math.round((my - PADDING) / CELL_SIZE);
+
+            if (col < 0 || col >= BOARD_SIZE || row < 0 || row >= BOARD_SIZE) return;
+            if (board[row][col] !== 0) return;
+
+            // 发送落子到服务器
+            socket.emit('move', { row, col });
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvasSize / rect.width;
+            const scaleY = canvasSize / rect.height;
+            const mx = (e.clientX - rect.left) * scaleX;
+            const my = (e.clientY - rect.top)  * scaleY;
+
+            const col = Math.round((mx - PADDING) / CELL_SIZE);
+            const row = Math.round((my - PADDING) / CELL_SIZE);
+
+            const newPos = (col >= 0 && col < BOARD_SIZE && row >= 0 && row < BOARD_SIZE)
+                ? { row, col } : null;
+
+            if (!hoverPos && !newPos) return;
+            if (hoverPos && newPos && hoverPos.row === newPos.row && hoverPos.col === newPos.col) return;
+
+            hoverPos = newPos;
+            drawBoard();
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            hoverPos = null;
+            drawBoard();
+        });
+
+        // ========== 按钮 ==========
+        function resetGame() {
+            socket.emit('reset');
+        }
+
+        function copyLink() {
+            const url = window.location.href;
+            // 尝试使用 Clipboard API
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(url).then(() => {
+                    showToast('✅ 链接已复制！发给对手吧');
+                }).catch(() => {
+                    fallbackCopy(url);
+                });
+            } else {
+                fallbackCopy(url);
+            }
+        }
+
+        function fallbackCopy(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); showToast('✅ 链接已复制！'); }
+            catch (e) { showToast('复制失败，请手动复制地址栏链接'); }
+            document.body.removeChild(ta);
+        }
+
+        // ========== Toast 消息 ==========
+        let toastTimer;
+        function showToast(msg) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+        }
+
+        // ========== 初始绘制 ==========
+        updateStatusDisplay();
+        drawBoard();
+    </script>
+</body>
+</html>
